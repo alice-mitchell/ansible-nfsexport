@@ -139,14 +139,21 @@ name:
 message:
     type: str
     description: The output message that the sample module generates
+error:
+    type: str
+    description: Detailed error description
 '''
 
 from ansible.module_utils.basic import AnsibleModule
 import os
 import shlex
 import fcntl
+import tempfile
+import subprocess
+from subprocess import CalledProcessError, check_output
 
 _EXPORTS = "/etc/exports"
+_EXPORTFS = "/usr/sbin/exportfs"
 
 def _parse_options(optionstring):
     """ Parse a comma seperated option list into a dict """
@@ -186,7 +193,7 @@ def _print_options(optionset):
 def _parse_export(line=None):
     """ Parse a line of export file into seperate entries """
 
-    if len(line) < 1 :
+    if len(line) < 1:
         return []
 
     parts = shlex.split(line, '#')
@@ -205,7 +212,7 @@ def _parse_export(line=None):
             else:
                 optionstring = host[1:-1]
                 host = '*'
-        exports.append( (path,host,optionstring) )
+        exports.append((path, host, optionstring))
     return exports
 
 def _open_exports(canwrite, filename, result):
@@ -215,75 +222,49 @@ def _open_exports(canwrite, filename, result):
         mode = "r"
 
     if not os.path.exists(filename):
-        result['debug'].append("file not exists when opening")
+        result['error'] = "file %s does not exist" % (filename)
         if canwrite:
             mode = "w"
         else:
             raise IOError
 
     try:
-        result['debug'].append("open(%s,%s)" % (filename, mode))
         efile = open(filename, mode)
-    except IOError as e:
-        result['debug'].append("open failed: %s" % (e.strerror))
+    except IOError as err:
+        result['error'] = "open %s failed: %s" % (filename, err.strerror)
         raise
 
     try:
         if canwrite:
             fcntl.flock(efile, fcntl.LOCK_EX)
-    except IOError as e:
-        result['debug'].append("LOCK_EX failed: %s" % (e.strerror))
+    except IOError as err:
+        result['error'] = "LOCK_EX on %s failed: %s" % (filename, err.strerror)
         raise
 
     return efile
 
-def _read_exports(efile):
-    """ Load the exports file line at a time and parse """
-    exports = []
-    for line in efile:
-        exports.extend( _parse_export(line) )
-    return exports
-
 def _write_exports(efile, exports, result):
     """ Write out exports entries """
-
     try:
-        result['debug'].append( 'Doing seek()' )
-        efile.seek(0)
-    except IOError:
-        raise
-
-    result['debug'].append( 'Writing exports to %s' % (efile) )
-    try:
-        result['debug'].append( 'Test write()' )
-        efile.write('# NFS exports managed by Ansible\n')
-    except IOError as e:
-        result['debug'].append( 'Test write failed: %s' % (e) )
-        raise
-
-    try:
-        result['debug'].append( 'Doing truncate()' )
-        efile.truncate(0)
-    except IOError as e:
-        result['debug'].append( 'Truncate failed: %s' % (e) )
-        raise
-
-    try:
-        result['debug'].append( 'Doing write()' )
-        efile.write('# NFS exports managed by Ansible\n')
-
-        result['debug'].append( 'Writing export lines' )
+        lastpath = None
         for exp in exports:
             path = exp[0]
             host = exp[1]
             opt = exp[2]
-            if ' ' in path:
-                path = '"%s"' % path
+
+            if path != lastpath:
+                lastpath = path
+                if ' ' in path:
+                    path = '"%s"' % path
+                efile.write("%s" % (path))
+
             if len(opt) > 0:
-                efile.write("%s %s(%s)\n" % (path, host, opt))
+                efile.write(" %s(%s)" % (host, opt))
             else:
-                efile.write("%s %s\n" % (path, host))
-    except IOError:
+                efile.write(" %s" % (host))
+        efile.write("\n")
+    except IOError as err:
+        result['error'] = 'Write error: %s' % (err.strerror)
         raise
 
 def match_export(exportlist, path, host):
@@ -296,7 +277,7 @@ def match_export(exportlist, path, host):
         if exp[0] == path and exp[1].lower() == host.lower():
             found = True
     return found
-                
+
 def filter_export(exportlist, path, host):
     """ Remove matching export from exportlist """
 
@@ -316,35 +297,70 @@ def filter_export(exportlist, path, host):
 
     return newlist
 
-def load_exports(result):
-    # Load the /etc/exports file and parse into an internal format
+def update_exports(result):
+    """ Run exportfs to update the system export list """
+    cmd = [_EXPORTFS, '-a']
     try:
-        efile = _open_exports(False, _EXPORTS, result)
-        exportlist = _read_exports(efile)
-    except IOError:
-        return []
-    if efile:
-        efile.close()
-    return exportlist
-
-def save_exports(export_list, result):
-    # write out a new /etc/exports file with the supplied entries
-    print "save_exports()"
-    print export_list
-    try:
-        efile = _open_exports(True, _EXPORTS, result)
-        result['debug'].append( 'Opened(%s)=%s' % (_EXPORTS, efile) )
-        _write_exports(efile, export_list, result)
-    except IOError:
+        check_output(cmd, stderr=subprocess.STDOUT)
+    except OSError as err:
+        result['error'] = 'Error running %s: %s' % (cmd[0], err.strerror)
         raise
-    if efile:
-        efile.close()
+    except CalledProcessError as err:
+        result['error'] = 'Error updating exports: %s' % (err.output)
+        raise
 
-def update_exports():
-    # Run exportfs to update the system export list
-    print "Updating system exports list"
-    # go run exportfs
-                          
+def replace_export(path, clients, options, clear_all, result):
+    """ Do an inline replace/add of the given export """
+    lines = 0
+    try:
+        outfile = tempfile.NamedTemporaryFile(dir=os.path.dirname(_EXPORTS),
+                                              prefix=os.path.basename(_EXPORTS),
+                                              delete=False, suffix=".tmp")
+        tmppath = outfile.name
+    except (OSError, IOError) as err:
+        result['error'] = 'Error with tmpfile: %s' % (err.strerror)
+        raise
+
+    try:
+        infile = _open_exports(False, _EXPORTS, result)
+    except IOError:
+        os.unlink(tmppath)
+        raise
+
+    try:
+        for line in infile:
+            if line == '' or line[0] == '#':
+                outfile.write(line)
+                lines += 1
+            else:
+                if clear_all:
+                    continue
+                exports = _parse_export(line)
+                if match_export(exports, path, clients):
+                    exports = filter_export(exports, path, clients)
+                    if exports:
+                        _write_exports(outfile, exports, result)
+                        lines += 1
+                else:
+                    outfile.write(line)
+                    lines += 1
+
+        if not lines:
+            outfile.write('# NFS exports managed by Ansible\n')
+
+        if options is not None:
+            exports = [(path, clients, options),]
+            _write_exports(outfile, exports, result)
+
+        outfile.close()
+        infile.close()
+        os.rename(tmppath, _EXPORTS)
+    except (IOError, OSError) as err:
+        if not result['error']:
+            result['error'] = 'Error during replace: %s' % (err.strerror)
+        os.unlink(tmppath)
+        raise
+
 def _option_compose(read_only, root_squash, all_squash, security, options):
     """ Compose an options string from the various parameters """
     optset = {}
@@ -363,12 +379,13 @@ def _option_compose(read_only, root_squash, all_squash, security, options):
 
     if options:
         if len(optstr) > 1:
-            optstr.append(',')
-        optstr.append(options)
+            optstr = optstr + ','
+        optstr = optstr + options
 
     return optstr
 
 def run_module():
+    """ Module code """
     # define the available arguments/parameters that a user can pass to
     # the module
     module_args = dict(
@@ -394,8 +411,7 @@ def run_module():
         changed=False,
         name='',
         message='',
-        exports=[],
-        debug=[]
+        error=None
     )
 
     # the AnsibleModule object will be our abstraction working with Ansible
@@ -416,49 +432,40 @@ def run_module():
     if module.check_mode:
         return result
 
-    # Where to store the list of exports, start with an empty list
-    exports = ()
+    path = module.params['path']
+    host = module.params['clients']
+    clear_all = module.params['clear_all']
 
-    # If we are not discarding the existing exports, load them
-    if module.params['clear_all'] != True:
-        exports = load_exports(result)
-        result['debug'].append('Loaded %d exports' % len(exports) )
-
-    result['exports'] = exports
     # do we need to add or remove anything from that list
     if module.params['action'] == 'add':
         result['message'] = 'Adding export'
-        if match_export(exports, module.params['path'], module.params['clients']):
-            module.fail_json(msg='Export already exists', **result)
-        path = module.params['path']
-        host = module.params['clients']
-        opt = _option_compose( module.params['read_only'],
-                               module.params['root_squash'], module.params['all_squash'],
-                               module.params['security'], module.params['options'])
-        exports.append( (path, host, opt) ) 
-    elif module.params['action'] == 'remove':
-        result['message'] = 'Removing export'
+        opt = _option_compose(module.params['read_only'],
+                              module.params['root_squash'],
+                              module.params['all_squash'],
+                              module.params['security'],
+                              module.params['options'])
+
         try:
-            exports = filter_export(exports, module.params['path'], module.params['clients'])
-        except:
-            module.fail_json(msg='Export not found', **result)
-        result['debug'].append('Filtered out (%s,%s)' % (module.params['path'], module.params['clients']) )
+            replace_export(path, host, opt, clear_all, result)
+        except (IOError, OSError):
+            module.fail_json(msg='Error adding export', **result)
+
+
+    elif module.params['action'] == 'remove':
+        try:
+            replace_export(path, host, None, clear_all, result)
+        except (IOError, OSError):
+            module.fail_json(msg='Error adding export', **result)
     else:
         result['message'] = 'Bad action'
         module.fail_json(msg='Unknown action type specified', **result)
 
-    # Write out the results
-    try:
-        save_exports(exports, result)
-        result['changed'] = True
-        result['debug'].append('Saved exports')
-    except IOError as e:
-        module.fail_json(msg='Error upating /etc/exports: %s' % (e.strerror), **result)
-
-
     # Optionally kick nfsd to reload the list
     if module.params['update']:
-        update_exports()
+        try:
+            update_exports(result)
+        except (OSError, CalledProcessError):
+            module.fail_json(msg='Error updating exports', **result)
 
     # during the execution of the module, if there is an exception or a
     # conditional state that effectively causes a failure, run
@@ -471,6 +478,7 @@ def run_module():
     module.exit_json(**result)
 
 def main():
+    """ entry point """
     run_module()
 
 if __name__ == '__main__':
