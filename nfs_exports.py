@@ -185,10 +185,10 @@ def _print_options(optionset):
         else:
             output.append(key + '=' + optionset[key])
 
-        if output:
-            return ",".join(output)
-        else:
-            return None
+    if output:
+        return ",".join(output)
+    else:
+        return None
 
 def _parse_export(line=None):
     """ Parse a line of export file into seperate entries """
@@ -310,7 +310,11 @@ def update_exports(result):
         raise
 
 def replace_export(path, clients, options, clear_all, result):
-    """ Do an inline replace/add of the given export """
+    """
+        Do an inline replace/add of the given exports
+        Removes any existing reference to (path,clients)
+        If options is not None then add new entry
+    """
     lines = 0
     try:
         outfile = tempfile.NamedTemporaryFile(dir=os.path.dirname(_EXPORTS),
@@ -444,6 +448,10 @@ def run_module():
                               module.params['all_squash'],
                               module.params['security'],
                               module.params['options'])
+
+        if not os.path.exists(path) or not os.path.isdir(path):
+            module.fail_json(msg='Path does not exist or is not a directory',
+                             **result)
 
         try:
             replace_export(path, host, opt, clear_all, result)
