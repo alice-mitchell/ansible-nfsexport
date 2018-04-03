@@ -9,7 +9,7 @@ Ansible module to add and remove NFS export entries
 | update | no | true | <ul><li>True</li><li>False</li></ul> | Should the system be updated when this command finishes |
 | clear_all | no | false | <ul><li>True</li><li>False</li></ul> | Discard all existing exports before performing this operation |
 | path | yes | |  | The path to export. Must already exist on the system |
-| clients | yes | | <ul><li>*</li><li>hostname</li><li>IP address</li><li>x.x.x.x/n</li><li>*.example.com</li><li>@nisgroup</li></ul> | The client(s) that matches this rule |
+| clients | yes | | <ul><li>&ast;</li><li>hostname</li><li>IP address</li><li>x.x.x.x/n</li><li>&ast;.example.com</li><li>@nisgroup</li></ul> | The client(s) that matches this rule |
 | read_only | no | true | <ul><li>True</li><li>False</li></ul> | Is this export read-only or read-write |
 | root_squash | no | true | <ul><li>True</li><li>False</li></ul> | Map request from uid/gid 0 to the anonymous uid/gid |
 | al_squash | no | false | <ul><li>True</li><li>False</li></ul> | Map all requests to the anonymous uid/gid |
@@ -24,3 +24,38 @@ Return values
 | name | string | The text supplied in the `name` input argument |
 | message | string | The output message |
 | error | string | Detailed error description if any occur |
+
+Examples
+
+'''yaml
+- name: Simple Example
+  nfs_exports:
+    name: Add a single export
+    action: add
+    path: /home
+    clients: *
+    read-only: false
+    update: true
+'''
+
+and a more complicated multi-part example which wipes out any existing enries 
+and replaces it with two new ones.
+'''yaml
+- name: Two Part
+  nfs_exports:
+    name: Clear and add first
+    action: add
+    erase_all: true
+    path: /home
+    clients: privhost.example.com
+    root_squash: false
+    read_only: false
+    sec: krb5p:krb5i:krb5
+    update: false
+  nfs_exports:
+    name: Second and final entry
+    action: add
+    path: /home
+    clients: *
+    update: true
+'''
