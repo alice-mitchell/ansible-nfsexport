@@ -27,7 +27,7 @@ Return values
 
 Examples
 
-'''yaml
+```YAML
 - name: Simple Example
   nfs_exports:
     name: Add a single export
@@ -36,11 +36,11 @@ Examples
     clients: *
     read-only: false
     update: true
-'''
+```
 
 and a more complicated multi-part example which wipes out any existing enries 
 and replaces it with two new ones.
-'''yaml
+```YAML
 - name: Two Part
   nfs_exports:
     name: Clear and add first
@@ -58,4 +58,4 @@ and replaces it with two new ones.
     path: /home
     clients: *
     update: true
-'''
+```
